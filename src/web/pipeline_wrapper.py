@@ -8,6 +8,7 @@ import re
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -35,6 +36,9 @@ class ProgressEvent:
     chunk: int = 0
     total_chunks: int = 0
     progress: float = 0.0
+    file_index: int = 0      # 当前第几篇（从 1 开始）
+    file_total: int = 0      # 总共几篇
+    file_title: str = ""     # 当前论文文件名（去掉 .pdf 后缀）
 
     def to_dict(self) -> dict:
         return {
@@ -46,6 +50,9 @@ class ProgressEvent:
             "chunk": self.chunk,
             "total_chunks": self.total_chunks,
             "progress": self.progress,
+            "file_index": self.file_index,
+            "file_total": self.file_total,
+            "file_title": self.file_title,
         }
 
 
@@ -61,6 +68,7 @@ class Job:
     result_markdown: str = ""
     result_json: dict = field(default_factory=dict)
     error: str = ""
+    submitted_at: str = ""  # ISO 格式的提交时间
 
 
 # 全局任务存储
@@ -96,11 +104,34 @@ class ProgressHandler(logging.Handler):
         self._loop = loop
         self._current_stage = 0
         self._total_pages = 0
+        self._file_index = 0
+        self._file_total = 0
+        self._file_title = ""
+
+    def set_file_info(self, index: int, total: int, title: str) -> None:
+        """设置当前处理的文件信息（从线程池中调用）"""
+        self._file_index = index
+        self._file_total = total
+        self._file_title = title
+        self._current_stage = 0
+
+    def _apply_file_info(self, event: ProgressEvent) -> ProgressEvent:
+        """为事件附加文件信息，并将进度映射到多文件整体进度"""
+        event.file_index = self._file_index
+        event.file_total = self._file_total
+        event.file_title = self._file_title
+        if self._file_total > 1 and event.progress >= 0:
+            single = event.progress
+            event.progress = round(
+                (self._file_index - 1 + single) / self._file_total, 3
+            )
+        return event
 
     def emit(self, record: logging.LogRecord) -> None:
         msg = record.getMessage()
         event = self._parse(msg)
         if event:
+            event = self._apply_file_info(event)
             try:
                 self._loop.call_soon_threadsafe(self._queue.put_nowait, event)
             except RuntimeError:
@@ -230,6 +261,7 @@ def create_job(
         analysis_type=analysis_type,
         ocr_model=ocr_model,
         llm_model=llm_model,
+        submitted_at=datetime.now().isoformat(),
     )
     _jobs[job_id] = job
     return job
@@ -262,12 +294,14 @@ async def run_job(job: Job) -> None:
 
     try:
         result = await loop.run_in_executor(
-            _executor, _run_pipeline_sync, job
+            _executor, _run_pipeline_sync, job, handler, loop
         )
         # 构建结果
         from src.utils.report_generator import _build_markdown_report, _build_json_data
         job.result_markdown = _build_markdown_report(result)
         job.result_json = _build_json_data(result)
+        # 注入提交时间到 processing 字段
+        job.result_json.setdefault("processing", {})["submitted_at"] = job.submitted_at
         job.status = JobStatus.COMPLETED
     except Exception as e:
         job.error = str(e)
@@ -288,7 +322,11 @@ async def run_job(job: Job) -> None:
             pass
 
 
-def _run_pipeline_sync(job: Job) -> Any:
+def _run_pipeline_sync(
+    job: Job,
+    handler: ProgressHandler,
+    loop: asyncio.AbstractEventLoop,
+) -> Any:
     """同步执行 Pipeline（在线程池中调用）"""
     from src.pipeline import Pipeline
 
@@ -297,12 +335,27 @@ def _run_pipeline_sync(job: Job) -> Any:
         llm_model=job.llm_model,
     )
     pipeline = Pipeline(config)
+    total = len(job.pdf_paths)
 
-    if len(job.pdf_paths) == 1:
-        return pipeline.run(job.pdf_paths[0], job.analysis_type)
-    else:
-        results = []
-        for pdf_path in job.pdf_paths:
-            r = pipeline.run(pdf_path, job.analysis_type)
-            results.append(r)
-        return results[-1] if results else None
+    results = []
+    for idx, pdf_path in enumerate(job.pdf_paths, 1):
+        title = pdf_path.stem
+        handler.set_file_info(idx, total, title)
+        # 发送文件切换事件
+        if total > 1:
+            event = ProgressEvent(
+                stage=0,
+                stage_name="切换论文",
+                detail=f"开始处理: {title}",
+                file_index=idx,
+                file_total=total,
+                file_title=title,
+                progress=round((idx - 1) / total, 3),
+            )
+            try:
+                loop.call_soon_threadsafe(job.queue.put_nowait, event)
+            except RuntimeError:
+                pass
+        r = pipeline.run(pdf_path, job.analysis_type)
+        results.append(r)
+    return results[-1] if results else None

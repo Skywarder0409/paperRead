@@ -16,6 +16,7 @@
     const progressPercent = document.getElementById("progressPercent");
     const progressFill = document.getElementById("progressFill");
     const progressDetail = document.getElementById("progressDetail");
+    const progressFileInfo = document.getElementById("progressFileInfo");
     const resultSection = document.getElementById("resultSection");
     const resultMarkdown = document.getElementById("resultMarkdown");
     const resultJson = document.getElementById("resultJson");
@@ -28,8 +29,17 @@
     let lastResultMarkdown = "";
     let lastResultJson = null;
 
+    const historyList = document.getElementById("historyList");
+    const historySearch = document.getElementById("historySearch");
+    const historyPageSize = document.getElementById("historyPageSize");
+    const historyPagination = document.getElementById("historyPagination");
+
+    // ── 历史状态 ──
+    let historyPage = 1;
+
     // ── 初始化 ──
     loadModels();
+    loadHistory();
 
     // ── 上传区域事件 ──
     uploadZone.addEventListener("click", () => fileInput.click());
@@ -250,10 +260,17 @@
                 ? `阶段 ${data.stage}/4: ${data.stage_name}`
                 : data.stage_name;
             updateProgress(pct, stageName, data.detail);
+
+            if (data.file_total > 1) {
+                progressFileInfo.textContent = `${data.file_title}  (${data.file_index}/${data.file_total})`;
+            } else {
+                progressFileInfo.textContent = "";
+            }
         });
 
         source.addEventListener("done", (e) => {
             source.close();
+            progressFileInfo.textContent = "";
             const data = JSON.parse(e.data);
             if (data.status === "completed") {
                 updateProgress(100, "分析完成", "正在加载结果...");
@@ -270,6 +287,7 @@
 
         source.onerror = () => {
             source.close();
+            progressFileInfo.textContent = "";
             // 尝试获取结果（可能已完成）
             setTimeout(() => fetchResults(jobId), 1000);
         };
@@ -311,6 +329,7 @@
             resultSection.classList.add("active");
             resultSection.scrollIntoView({ behavior: "smooth", block: "start" });
             resetButton();
+            loadHistory();
         } catch (e) {
             showError("获取结果失败: " + e.message);
             resetButton();
@@ -392,6 +411,18 @@
         return div.innerHTML;
     }
 
+    function formatTime(isoStr) {
+        if (!isoStr) return "";
+        try {
+            const d = new Date(isoStr);
+            if (isNaN(d.getTime())) return "";
+            const pad = (n) => String(n).padStart(2, "0");
+            return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+        } catch {
+            return "";
+        }
+    }
+
     function showError(msg) {
         errorMsg.textContent = msg;
         errorMsg.classList.add("active");
@@ -399,5 +430,212 @@
 
     function hideError() {
         errorMsg.classList.remove("active");
+    }
+
+    // ── 历史论文 ──
+    let searchTimer = null;
+    historySearch.addEventListener("input", () => {
+        clearTimeout(searchTimer);
+        searchTimer = setTimeout(() => {
+            historyPage = 1;
+            loadHistory();
+        }, 300);
+    });
+
+    historyPageSize.addEventListener("change", () => {
+        historyPage = 1;
+        loadHistory();
+    });
+
+    async function loadHistory() {
+        try {
+            const search = historySearch.value.trim();
+            const pageSize = historyPageSize.value;
+            const params = new URLSearchParams({ page: historyPage, page_size: pageSize });
+            if (search) params.set("search", search);
+
+            const resp = await fetch("/api/history?" + params);
+            const data = await resp.json();
+            renderHistory(data.items);
+            renderPagination(data.total, data.page, data.page_size);
+        } catch (e) {
+            // 静默失败，不影响主功能
+        }
+    }
+
+    function renderHistory(items) {
+        if (!items.length) {
+            historyList.innerHTML = '<div class="history-empty">暂无历史记录</div>';
+            return;
+        }
+
+        historyList.innerHTML = "";
+        items.forEach(item => {
+            const div = document.createElement("div");
+            div.className = "history-item";
+
+            const typeMap = {
+                comprehensive: "综合分析",
+                quick: "快速总结",
+                methodology_focus: "方法论聚焦",
+            };
+            const typeName = typeMap[item.analysis_type] || item.analysis_type;
+            const submittedAt = formatTime(item.submitted_at);
+            const completedAt = formatTime(item.completed_at);
+
+            div.innerHTML = `
+                <div class="history-item-info">
+                    <div class="history-item-title">${escapeHtml(item.title)}</div>
+                    <div class="history-item-meta">${escapeHtml(typeName)} · ${escapeHtml(item.model)}${submittedAt ? ` · 提交: ${submittedAt}` : ""}${completedAt ? ` · 完成: ${completedAt}` : ""}</div>
+                </div>
+                <div class="history-item-actions">
+                    <button class="btn-history btn-history-read">阅读</button>
+                    <div class="download-dropdown">
+                        <button class="btn-history">下载 ▾</button>
+                        <div class="download-dropdown-menu">
+                            <button class="download-dropdown-item" data-file="${escapeHtml(item.files.summary)}">summary.md</button>
+                            <button class="download-dropdown-item" data-file="${escapeHtml(item.files.analysis)}">analysis.json</button>
+                            <button class="download-dropdown-item" data-file="${escapeHtml(item.files.structured)}">structured.md</button>
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            // 阅读按钮
+            div.querySelector(".btn-history-read").addEventListener("click", () => {
+                readHistoryFile(item.files.summary);
+            });
+
+            // 下载下拉
+            const dropdownBtn = div.querySelector(".download-dropdown > .btn-history");
+            const dropdownMenu = div.querySelector(".download-dropdown-menu");
+
+            dropdownBtn.addEventListener("click", (e) => {
+                e.stopPropagation();
+                document.querySelectorAll(".download-dropdown-menu.active").forEach(m => {
+                    if (m !== dropdownMenu) m.classList.remove("active");
+                });
+                dropdownMenu.classList.toggle("active");
+            });
+
+            dropdownMenu.querySelectorAll(".download-dropdown-item").forEach(btn => {
+                btn.addEventListener("click", (e) => {
+                    e.stopPropagation();
+                    dropdownMenu.classList.remove("active");
+                    downloadHistoryFile(btn.dataset.file);
+                });
+            });
+
+            historyList.appendChild(div);
+        });
+    }
+
+    function renderPagination(total, page, pageSize) {
+        historyPagination.innerHTML = "";
+        const totalPages = Math.ceil(total / pageSize);
+        if (totalPages <= 1) return;
+
+        // 上一页
+        const prevBtn = document.createElement("button");
+        prevBtn.textContent = "‹";
+        prevBtn.disabled = page <= 1;
+        prevBtn.addEventListener("click", () => { historyPage = page - 1; loadHistory(); });
+        historyPagination.appendChild(prevBtn);
+
+        // 页码按钮（最多显示 7 个）
+        const pages = computePageNumbers(page, totalPages, 7);
+        pages.forEach(p => {
+            if (p === "...") {
+                const span = document.createElement("span");
+                span.className = "page-info";
+                span.textContent = "...";
+                historyPagination.appendChild(span);
+            } else {
+                const btn = document.createElement("button");
+                btn.textContent = p;
+                if (p === page) btn.classList.add("active");
+                btn.addEventListener("click", () => { historyPage = p; loadHistory(); });
+                historyPagination.appendChild(btn);
+            }
+        });
+
+        // 下一页
+        const nextBtn = document.createElement("button");
+        nextBtn.textContent = "›";
+        nextBtn.disabled = page >= totalPages;
+        nextBtn.addEventListener("click", () => { historyPage = page + 1; loadHistory(); });
+        historyPagination.appendChild(nextBtn);
+
+        // 总数提示
+        const info = document.createElement("span");
+        info.className = "page-info";
+        info.textContent = `共 ${total} 条`;
+        historyPagination.appendChild(info);
+    }
+
+    function computePageNumbers(current, total, maxButtons) {
+        if (total <= maxButtons) {
+            return Array.from({ length: total }, (_, i) => i + 1);
+        }
+        const pages = [];
+        pages.push(1);
+        let start = Math.max(2, current - 1);
+        let end = Math.min(total - 1, current + 1);
+        // 保证中间至少3个
+        if (current <= 3) end = Math.min(total - 1, 4);
+        if (current >= total - 2) start = Math.max(2, total - 3);
+
+        if (start > 2) pages.push("...");
+        for (let i = start; i <= end; i++) pages.push(i);
+        if (end < total - 1) pages.push("...");
+        pages.push(total);
+        return pages;
+    }
+
+    // 点击其他地方关闭下拉菜单
+    document.addEventListener("click", () => {
+        document.querySelectorAll(".download-dropdown-menu.active").forEach(m => {
+            m.classList.remove("active");
+        });
+    });
+
+    async function readHistoryFile(filename) {
+        try {
+            const resp = await fetch(`/api/history/${encodeURIComponent(filename)}`);
+            if (!resp.ok) throw new Error("加载失败");
+            const text = await resp.text();
+
+            resultMarkdown.innerHTML = simpleMarkdown(text);
+            resultJson.innerHTML = "";
+            resultJson.style.display = "none";
+
+            // 切换 tab 到报告
+            document.querySelectorAll(".result-tab").forEach(t => t.classList.remove("active"));
+            document.querySelector('.result-tab[data-tab="markdown"]').classList.add("active");
+            resultMarkdown.style.display = "";
+
+            resultSection.classList.add("active");
+            resultSection.scrollIntoView({ behavior: "smooth", block: "start" });
+        } catch (e) {
+            showError("加载历史报告失败: " + e.message);
+        }
+    }
+
+    async function downloadHistoryFile(filename) {
+        try {
+            const resp = await fetch(`/api/history/${encodeURIComponent(filename)}`);
+            if (!resp.ok) throw new Error("下载失败");
+            const blob = await resp.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        } catch (e) {
+            showError("下载失败: " + e.message);
+        }
     }
 })();

@@ -7,12 +7,12 @@ import json
 import shutil
 import uuid
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import ollama
 import uvicorn
-from fastapi import FastAPI, File, UploadFile, Form
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Query
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
@@ -33,6 +33,9 @@ app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 # 上传目录
 _UPLOAD_DIR = Path("cache/uploads")
 _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+# 输出目录（历史论文）
+_OUTPUT_DIR = Path("output")
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -179,6 +182,85 @@ async def get_results(job_id: str):
         "markdown": job.result_markdown,
         "json_data": job.result_json,
     }
+
+
+@app.get("/api/history")
+async def list_history(
+    search: Optional[str] = Query(None, description="搜索关键词（标题/作者）"),
+    page: int = Query(1, ge=1, description="页码"),
+    page_size: int = Query(10, ge=1, le=100, description="每页条数"),
+):
+    """扫描 output/ 目录，返回历史论文列表（按标题字母排序，分页）"""
+    if not _OUTPUT_DIR.exists():
+        return {"items": [], "total": 0, "page": page, "page_size": page_size}
+
+    items = []
+    for fp in _OUTPUT_DIR.glob("*_analysis.json"):
+        try:
+            data = json.loads(fp.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+
+        meta = data.get("metadata", {})
+        analysis = data.get("analysis", {})
+        processing = data.get("processing", {})
+        base_name = fp.name.removesuffix("_analysis.json")
+        summary_file = base_name + "_summary.md"
+        structured_file = base_name + "_structured.md"
+
+        items.append({
+            "title": meta.get("title", base_name),
+            "author": meta.get("author", ""),
+            "total_pages": meta.get("total_pages", 0),
+            "analysis_type": analysis.get("type", ""),
+            "model": analysis.get("model", ""),
+            "time_seconds": processing.get("time_seconds", 0),
+            "generated_at": processing.get("generated_at", ""),
+            "submitted_at": processing.get("submitted_at", ""),
+            "completed_at": processing.get("generated_at", ""),
+            "base_name": base_name,
+            "files": {
+                "summary": summary_file,
+                "analysis": fp.name,
+                "structured": structured_file,
+            },
+        })
+
+    # 搜索过滤
+    if search:
+        kw = search.lower()
+        items = [
+            it for it in items
+            if kw in it["title"].lower() or kw in it["author"].lower()
+        ]
+
+    # 按标题字母排序
+    items.sort(key=lambda x: x["title"].lower())
+
+    total = len(items)
+    start = (page - 1) * page_size
+    paged_items = items[start : start + page_size]
+
+    return {"items": paged_items, "total": total, "page": page, "page_size": page_size}
+
+
+@app.get("/api/history/{filename:path}")
+async def get_history_file(filename: str):
+    """读取 output/ 目录下的单个文件（防止路径穿越）"""
+    # 安全检查：防止路径穿越
+    safe_path = (_OUTPUT_DIR / filename).resolve()
+    if not str(safe_path).startswith(str(_OUTPUT_DIR.resolve())):
+        raise HTTPException(status_code=403, detail="禁止访问")
+
+    if not safe_path.exists() or not safe_path.is_file():
+        raise HTTPException(status_code=404, detail="文件不存在")
+
+    content = safe_path.read_text(encoding="utf-8")
+
+    if safe_path.suffix == ".json":
+        return JSONResponse(content=json.loads(content))
+
+    return PlainTextResponse(content=content)
 
 
 if __name__ == "__main__":

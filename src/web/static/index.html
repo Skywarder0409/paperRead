@@ -71,7 +71,7 @@
 
         <!-- 进度 -->
         <div class="card progress-section" id="progressSection">
-            <div class="card-title">分析进度</div>
+            <div class="card-title">分析进度<span class="progress-file-info" id="progressFileInfo"></span></div>
             <div class="progress-header">
                 <span class="progress-stage" id="progressStage">准备中...</span>
                 <span class="progress-percent" id="progressPercent">0%</span>
@@ -95,6 +95,26 @@
                 <button class="btn-download" id="btnDownloadMd">下载 Markdown 报告</button>
                 <button class="btn-download btn-download-secondary" id="btnDownloadJson">下载 JSON 数据</button>
             </div>
+        </div>
+
+        <!-- 历史论文 -->
+        <div class="card" id="historySection">
+            <div class="card-title">历史论文</div>
+            <div class="history-toolbar">
+                <input type="text" class="history-search" id="historySearch" placeholder="搜索标题或作者...">
+                <div class="history-page-size">
+                    <label for="historyPageSize">每页</label>
+                    <select id="historyPageSize">
+                        <option value="10" selected>10</option>
+                        <option value="50">50</option>
+                        <option value="100">100</option>
+                    </select>
+                </div>
+            </div>
+            <div class="history-list" id="historyList">
+                <div class="history-empty">暂无历史记录</div>
+            </div>
+            <div class="history-pagination" id="historyPagination"></div>
         </div>
     </main>
 
