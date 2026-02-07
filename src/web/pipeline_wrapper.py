@@ -70,6 +70,8 @@ class Job:
     result_json: dict = field(default_factory=dict)
     error: str = ""
     submitted_at: str = ""  # ISO 格式的提交时间
+    ocr_parallel_threads: int = 1
+    read_strategy: str = "hierarchical"
 
 
 # 全局任务存储
@@ -93,6 +95,8 @@ class ProgressHandler(logging.Handler):
     _RE_STAGE_DONE = re.compile(r"阶段(\d) 完成")
     _RE_OCR_PAGE = re.compile(r"\[(\d+)/(\d+)\] 页面 \d+ 完成")
     _RE_CHUNK = re.compile(r"总结块 (\d+)/(\d+)")
+    _RE_ANCHOR_START = re.compile(r"正在固化全局锚点")
+    _RE_ANCHOR_CHUNK = re.compile(r"精读块 (\d+)/(\d+)")
     _RE_PIPELINE_DONE = re.compile(r"Pipeline 完成，耗时 ([\d.]+) 秒")
     _RE_LLM_ANALYZE = re.compile(r"开始 LLM 分析")
     _RE_LLM_DONE = re.compile(r"LLM 分析完成")
@@ -215,6 +219,34 @@ class ProgressHandler(logging.Handler):
                 progress=round(progress, 3),
             )
 
+        # 精度模式：固化锚点
+        m = self._RE_ANCHOR_START.search(msg)
+        if m:
+            base = sum(_STAGE_WEIGHTS.get(i, 0) for i in range(1, 4))
+            return ProgressEvent(
+                stage=4,
+                stage_name="LLM深度分析",
+                detail="正在固化全局锚点...",
+                progress=round(base + 0.05, 3),
+            )
+
+        # 精度模式：分块精读
+        m = self._RE_ANCHOR_CHUNK.search(msg)
+        if m:
+            chunk, total = int(m.group(1)), int(m.group(2))
+            base = sum(_STAGE_WEIGHTS.get(i, 0) for i in range(1, 4))
+            # 给锚点固化预留 10% 进度，剩下的按块分
+            stage_prog = (chunk / total) * 0.9 + 0.1 if total else 0
+            progress = base + _STAGE_WEIGHTS[4] * stage_prog
+            return ProgressEvent(
+                stage=4,
+                stage_name="LLM深度分析",
+                detail=f"精读块 {chunk}/{total} (带锚点注入)",
+                chunk=chunk,
+                total_chunks=total,
+                progress=round(progress, 3),
+            )
+
         # LLM 分析开始
         m = self._RE_LLM_ANALYZE.search(msg)
         if m:
@@ -253,9 +285,11 @@ class ProgressHandler(logging.Handler):
 
 def create_job(
     pdf_paths: List[Path],
-    analysis_type: AnalysisType,
+    analysis_type: Union[AnalysisType, str],
     ocr_model: str,
     llm_model: str,
+    ocr_parallel_threads: int = 1,
+    read_strategy: str = "hierarchical",
 ) -> Job:
     job_id = uuid.uuid4().hex[:12]
     job = Job(
@@ -265,6 +299,8 @@ def create_job(
         ocr_model=ocr_model,
         llm_model=llm_model,
         submitted_at=datetime.now().isoformat(),
+        ocr_parallel_threads=ocr_parallel_threads,
+        read_strategy=read_strategy,
     )
     _jobs[job_id] = job
     return job
@@ -336,6 +372,8 @@ def _run_pipeline_sync(
     config = PipelineConfig(
         ocr_model=job.ocr_model,
         llm_model=job.llm_model,
+        ocr_parallel_threads=job.ocr_parallel_threads,
+        read_strategy=job.read_strategy,
     )
     pipeline = Pipeline(config)
     total = len(job.pdf_paths)
@@ -360,5 +398,45 @@ def _run_pipeline_sync(
             except RuntimeError:
                 pass
         r = pipeline.run(pdf_path, job.analysis_type)
+        
+        # ── 标题同步更新 ──
+        # Pipeline 内部可能在阶段 3 识别出了真实标题，更新同步给 Web UI 的 handler
+        if r.metadata.title and r.metadata.title != title:
+            _wrapper_logger.info("同步 UI 标题: %s -> %s", title, r.metadata.title)
+            handler.set_file_info(idx, total, r.metadata.title)
+            # 发送一个静默进度事件刷新前端显示的标题
+            event = handler._job.last_progress
+            if event:
+                event.file_title = r.metadata.title
+                try: loop.call_soon_threadsafe(job.queue.put_nowait, event)
+                except: pass
+        
+        # ── 论文重命名 ──
+        # 将 papers/ 目录下的 PDF 文件重命名为分析出的论文标题
+        try:
+            from src.utils.report_generator import _sanitize
+            safe_title = _sanitize(r.metadata.title)
+            new_filename = f"{safe_title}.pdf"
+            papers_dir = Path("papers")
+            
+            # 找到 papers/ 下对应的文件 (可能是 pdf_path 本身，也可能是上传时的同步副本)
+            pdf_in_papers = papers_dir / pdf_path.name
+            if pdf_in_papers.exists() and pdf_in_papers.name != new_filename:
+                target_path = papers_dir / new_filename
+                
+                # 如果目标文件名已存在且不是当前文件，尝试加序号避免冲突
+                if target_path.exists():
+                    for i in range(1, 100):
+                        temp_name = f"{safe_title}_{i}.pdf"
+                        target_path = papers_dir / temp_name
+                        if not target_path.exists():
+                            break
+                
+                if not target_path.exists(): # 最终确认
+                    pdf_in_papers.rename(target_path)
+                    _wrapper_logger.info("论文归档重命名: %s -> %s", pdf_in_papers.name, target_path.name)
+        except Exception as e:
+            _wrapper_logger.warning("自动重命名论文失败: %s", e)
+
         results.append(r)
     return results[-1] if results else None

@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
 from src.models import AnalysisType
+from src.analysis.prompts import list_prompt_library, PROMPTS_DIR
 from src.web.pipeline_wrapper import (
     JobStatus,
     create_job,
@@ -34,6 +35,10 @@ app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 # 上传目录
 _UPLOAD_DIR = Path("cache/uploads")
 _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+# 论文存储目录
+_PAPERS_DIR = Path("papers")
+_PAPERS_DIR.mkdir(parents=True, exist_ok=True)
 
 # 输出目录（历史论文）
 _OUTPUT_DIR = Path("output")
@@ -93,9 +98,17 @@ async def upload_files(files: List[UploadFile] = File(...)):
     for f in files:
         if not f.filename.lower().endswith(".pdf"):
             continue
+        
+        # 保存到临时上传目录 (用于当前任务)
         dest = upload_path / f.filename
         content = await f.read()
         dest.write_bytes(content)
+        
+        # 同时保存到 papers/ 目录 (实现持久化)
+        paper_dest = _PAPERS_DIR / f.filename
+        if not paper_dest.exists():
+            shutil.copy2(dest, paper_dest)
+            
         saved.append({"name": f.filename, "path": str(dest)})
 
     if not saved:
@@ -106,26 +119,39 @@ async def upload_files(files: List[UploadFile] = File(...)):
 
 @app.post("/api/analyze")
 async def start_analysis(
-    file_id: str = Form(...),
+    file_id: Optional[str] = Form(None),
+    filenames: Optional[str] = Form(None),  # JSON array of filenames in papers/
     ocr_model: str = Form(...),
     llm_model: str = Form(...),
     analysis_type: str = Form("comprehensive"),
+    read_strategy: str = Form("hierarchical"),
+    ocr_parallel_threads: int = Form(1),
 ):
     """启动分析任务"""
-    upload_path = _UPLOAD_DIR / file_id
-    if not upload_path.exists():
-        return JSONResponse(status_code=404, content={"error": "文件未找到"})
-
-    pdf_paths = sorted(upload_path.glob("*.pdf"))
+    pdf_paths = []
+    
+    if file_id:
+        upload_path = _UPLOAD_DIR / file_id
+        if upload_path.exists():
+            pdf_paths.extend(sorted(upload_path.glob("*.pdf")))
+    
+    if filenames:
+        try:
+            names = json.loads(filenames)
+            for name in names:
+                path = _PAPERS_DIR / name
+                if path.exists():
+                    pdf_paths.append(path)
+        except json.JSONDecodeError:
+            pass # 忽略错误格式
+            
     if not pdf_paths:
-        return JSONResponse(status_code=400, content={"error": "目录中无 PDF 文件"})
+        return JSONResponse(status_code=400, content={"error": "未指定有效的 PDF 文件"})
 
-    try:
-        atype = AnalysisType(analysis_type)
-    except ValueError:
-        atype = AnalysisType.COMPREHENSIVE
+    # 直接使用 analysis_type 字符串，不再强制转换 Enum
+    atype = analysis_type
 
-    job = create_job(pdf_paths, atype, ocr_model, llm_model)
+    job = create_job(pdf_paths, atype, ocr_model, llm_model, ocr_parallel_threads, read_strategy)
 
     # 后台启动任务
     asyncio.create_task(run_job(job))
@@ -205,6 +231,7 @@ async def get_results(job_id: str):
 @app.get("/api/history")
 async def list_history(
     search: Optional[str] = Query(None, description="搜索关键词（标题/作者）"),
+    sort: str = Query("time_desc", description="排序方式: time_desc, time_asc, title_asc, title_desc"),
     page: int = Query(1, ge=1, description="页码"),
     page_size: int = Query(10, ge=1, le=100, description="每页条数"),
 ):
@@ -252,14 +279,132 @@ async def list_history(
             if kw in it["title"].lower() or kw in it["author"].lower()
         ]
 
-    # 按标题字母排序
-    items.sort(key=lambda x: x["title"].lower())
+    # 排序处理
+    if sort == "time_asc":
+        items.sort(key=lambda x: x.get("generated_at", ""))
+    elif sort == "title_asc":
+        items.sort(key=lambda x: x["title"].lower())
+    elif sort == "title_desc":
+        items.sort(key=lambda x: x["title"].lower(), reverse=True)
+    else: # 默认 time_desc
+        items.sort(key=lambda x: x.get("generated_at", ""), reverse=True)
 
     total = len(items)
     start = (page - 1) * page_size
     paged_items = items[start : start + page_size]
 
     return {"items": paged_items, "total": total, "page": page, "page_size": page_size}
+
+
+@app.get("/api/papers")
+async def list_papers():
+    """获取 papers/ 目录下的 PDF 文件列表"""
+    if not _PAPERS_DIR.exists():
+        return {"papers": []}
+    
+    papers = []
+    for fp in sorted(_PAPERS_DIR.glob("*.pdf")):
+        papers.append({
+            "name": fp.name,
+            "path": str(fp),
+            "size": fp.stat().st_size,
+            "modified_at": fp.stat().st_mtime
+        })
+    return {"papers": papers}
+
+
+@app.post("/api/papers/delete")
+async def delete_paper(filename: str = Form(...)):
+    """从 papers/ 目录删除指定的 PDF 文件"""
+    path = _PAPERS_DIR / filename
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="文件不存在")
+    
+    try:
+        path.unlink()
+        return {"message": f"已删除 {filename}"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"删除失败: {e}")
+
+
+@app.post("/api/history/delete")
+async def delete_history(base_name: str = Form(...)):
+    """从 output/ 目录删除指定的历史记录文件"""
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    if not _OUTPUT_DIR.exists():
+        raise HTTPException(status_code=404, detail="目录不存在")
+
+    # 删除相关的文件（允许部分文件不存在）
+    extensions = ["_analysis.json", "_summary.md", "_structured.md"]
+    deleted = []
+    
+    for ext in extensions:
+        fp = _OUTPUT_DIR / (base_name + ext)
+        if fp.exists():
+            try:
+                fp.unlink()
+                deleted.append(fp.name)
+                logger.info(f"已删除: {fp.name}")
+            except Exception as e:
+                logger.error(f"删除失败 {fp.name}: {e}")
+    
+    # 同时尝试删除 cache 目录下的相关文件
+    cache_dir = Path("cache")
+    if cache_dir.exists():
+        for item in cache_dir.rglob(f"{base_name}*"):
+            if item.is_file():
+                try:
+                    item.unlink()
+                    deleted.append(str(item.relative_to(cache_dir)))
+                    logger.info(f"已删除缓存: {item}")
+                except Exception as e:
+                    logger.error(f"删除缓存失败 {item}: {e}")
+    
+    if not deleted:
+        raise HTTPException(status_code=404, detail="未找到相关历史文件")
+        
+    return {"message": f"已删除历史记录: {base_name}", "files": deleted}
+
+
+@app.get("/api/prompts")
+async def get_prompts():
+    """获取提示词库 (学科 -> 模式)"""
+    return {"library": list_prompt_library()}
+
+
+@app.get("/api/prompts/content")
+async def get_prompt_content(path: str = Query(...)):
+    """获取指定提示词文件的内容"""
+    # 简单安全检查
+    if ".." in path or path.startswith("/"):
+         raise HTTPException(status_code=400, detail="无效路径")
+         
+    target_file = PROMPTS_DIR / f"{path}.txt"
+    if not target_file.exists():
+        raise HTTPException(status_code=404, detail="提示词未找到")
+        
+    return {"content": target_file.read_text(encoding="utf-8")}
+
+
+@app.post("/api/prompts/save")
+async def save_prompt(
+    category: str = Form(...),
+    name: str = Form(...),
+    content: str = Form(...),
+):
+    """保存自定义提示词"""
+    safe_category = "".join(c for c in category if c.isalnum() or c in " _-") or "自定义"
+    safe_name = "".join(c for c in name if c.isalnum() or c in " _-") or "新提示词"
+    
+    target_dir = PROMPTS_DIR / safe_category
+    target_dir.mkdir(parents=True, exist_ok=True)
+    
+    target_file = target_dir / f"{safe_name}.txt"
+    target_file.write_text(content, encoding="utf-8")
+    
+    return {"status": "success", "path": f"{safe_category}/{safe_name}"}
 
 
 @app.get("/api/history/{filename:path}")
@@ -291,6 +436,34 @@ async def shutdown():
 
     asyncio.create_task(_exit())
     return {"message": "shutting down"}
+
+
+@app.post("/api/restart")
+async def restart():
+    """重启服务器"""
+    import sys
+    import os
+    
+    async def _restart():
+        await asyncio.sleep(0.5)
+        
+        executable = sys.executable
+        args = sys.argv[:]
+        
+        # 核心修复：确保项目根目录在 PYTHONPATH 中
+        # 这样重启后的进程能正确执行 'import src'
+        cwd = os.getcwd()
+        env = os.environ.copy()
+        if "PYTHONPATH" in env:
+            env["PYTHONPATH"] = cwd + os.pathsep + env["PYTHONPATH"]
+        else:
+            env["PYTHONPATH"] = cwd
+        
+        # 使用 execve 以携带更新后的环境变量
+        os.execve(executable, [executable] + args, env)
+
+    asyncio.create_task(_restart())
+    return {"message": "restarting"}
 
 
 if __name__ == "__main__":

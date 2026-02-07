@@ -75,11 +75,11 @@ class TransformersLLMEngine:
         self,
         full_markdown: str,
         structure: DocumentStructure,
-        analysis_type: AnalysisType = AnalysisType.COMPREHENSIVE,
+        analysis_type: Union[AnalysisType, str] = AnalysisType.COMPREHENSIVE,
         max_tokens: int = 4096,
     ) -> AnalysisResult:
         """对文档进行深度分析。"""
-        prompt_template = get_prompt(analysis_type)
+        prompt_template = get_prompt(analysis_type if not isinstance(analysis_type, AnalysisType) else analysis_type.value)
 
         # 构造上下文摘要，帮助 LLM 理解文档结构
         context_hint = ""
@@ -94,7 +94,8 @@ class TransformersLLMEngine:
         content = context_hint + "\n" + full_markdown if context_hint else full_markdown
         prompt = prompt_template.format(content=content)
 
-        logger.info("开始 LLM 分析 (模式=%s, 输入长度=%d)", analysis_type.value, len(prompt))
+        display_mode = analysis_type.value if isinstance(analysis_type, AnalysisType) else analysis_type
+        logger.info("开始 LLM 分析 (模式=%s, 输入长度=%d)", display_mode, len(prompt))
         t0 = time.time()
         analysis_text = self._generate(prompt, max_new_tokens=max_tokens)
         elapsed = time.time() - t0

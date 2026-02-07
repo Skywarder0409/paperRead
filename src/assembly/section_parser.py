@@ -111,12 +111,49 @@ class RegexSectionParser:
         tables = self._extract_tables(full_markdown)
         refs_page = self._detect_references_page(page_contents) if page_contents else None
 
-        # 提取文档标题：取第一个 level=1 的标题
+        # 提取文档标题：优先取第一个 level=1 的标题，但要过滤掉期刊标记词
         title = ""
+        journal_markers = ["note", "letter", "communication", "article", "paper", "preprint"]
+        
         for s in sections:
             if s["level"] == 1:
-                title = s["title"]
-                break
+                candidate = s["title"].strip()
+                # 只跳过单个词的期刊标记（不是标题的一部分）
+                words = candidate.lower().split()
+                if len(words) == 1 and words[0] in journal_markers:
+                    continue  # 跳过单个期刊标记词
+                # 接受任何非空标题
+                if candidate:
+                    title = candidate
+                    break
+        
+        # 改进：如果正则没标出有效标题，从第一页文本中深度检索候选标题
+        if not title and page_contents:
+            lines = page_contents[0].markdown.strip().split("\n")
+            # 过滤掉 DOI, Elsevier ID, 网址, 常见期刊页码头, 以及占位标记
+            noise_patterns = [
+                r"^1-s2\.0-.*", r"^http.*", r"^doi:.*", r"^www\..*",
+                r"^Downloaded from.*", r"^Journal of .*", r"^Research Article.*",
+                r"^\d{4} Elsevier.*", r"^Available online.*",
+                r"^[Tt]able of [Cc]ontents", r"^[Rr]eferences", r"^[Aa]bstract$",
+            ]
+            
+            for line in lines[:25]: # 扫描前25行
+                line = line.strip("#* · \t") # 移除包括特殊点的所有修饰符
+                if not line:
+                    continue
+                # 检查是否匹配任何噪音模式
+                is_noise = any(re.match(p, line, re.IGNORECASE) for p in noise_patterns)
+                if not is_noise:
+                    # 如果这行内容全是页码或版权（如 2024 IEEE），过滤掉
+                    if re.search(r"^\d+$", line) or re.search(r"© \d{4}", line):
+                        continue
+                    # 如果是单个词且在期刊标记列表中，跳过
+                    words = line.lower().split()
+                    if len(words) == 1 and words[0] in journal_markers:
+                        continue
+                    title = line
+                    break
 
         structure = DocumentStructure(
             title=title,
@@ -128,7 +165,7 @@ class RegexSectionParser:
         )
 
         logger.info(
-            "结构索引: %d 章节, %d 图, %d 表, 参考文献起始页=%s",
-            len(sections), len(figures), len(tables), refs_page,
+            "结构索引: 最终判定标题=%s, %d 章节, %d 图, %d 表",
+            title, len(sections), len(figures), len(tables)
         )
         return structure

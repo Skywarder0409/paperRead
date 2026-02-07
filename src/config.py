@@ -13,6 +13,7 @@ class PipelineConfig:
     # 模型选择
     ocr_model: str = "deepseek-ocr2"
     llm_model: str = "qwen3-30b-a3b"
+    read_strategy: str = "hierarchical"
 
     # 路径配置
     input_dir: Path = field(default_factory=lambda: Path("papers"))
@@ -26,6 +27,7 @@ class PipelineConfig:
     # 显存管理
     unload_after_stage: bool = True
     gpu_device: str = "cuda:0"
+    ocr_parallel_threads: int = 1 # OCR 并发线程数
 
     # LLM 分析
     max_tokens: int = 4096

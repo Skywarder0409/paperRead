@@ -5,10 +5,21 @@
 
     // ── DOM 元素 ──
     const uploadZone = document.getElementById("uploadZone");
+    const analysisSubject = document.getElementById("analysisSubject");
+    const analysisMode = document.getElementById("analysisMode");
+    const promptPreview = document.getElementById("promptPreview");
+    const promptPreviewContent = document.getElementById("promptPreviewContent");
+    const btnShowCustomPrompt = document.getElementById("btnShowCustomPrompt");
+    const customPromptArea = document.getElementById("customPromptArea");
+    const customPromptText = document.getElementById("customPromptText");
+    const saveCustomPrompt = document.getElementById("saveCustomPrompt");
+    const customPromptName = document.getElementById("customPromptName");
     const fileInput = document.getElementById("fileInput");
     const fileList = document.getElementById("fileList");
     const ocrSelect = document.getElementById("ocrModel");
     const llmSelect = document.getElementById("llmModel");
+    const readStrategy = document.getElementById("readStrategy");
+    const ocrParallelThreads = document.getElementById("ocrParallelThreads");
     const btnAnalyze = document.getElementById("btnAnalyze");
     const errorMsg = document.getElementById("errorMsg");
     const progressSection = document.getElementById("progressSection");
@@ -23,17 +34,33 @@
     const btnDownloadMd = document.getElementById("btnDownloadMd");
     const btnDownloadJson = document.getElementById("btnDownloadJson");
     const btnShutdown = document.getElementById("btnShutdown");
+    const btnRestart = document.getElementById("btnRestart");
+    const progressTimer = document.getElementById("progressTimer");
+    const papersDropdown = document.getElementById("papersDropdown");
+    const papersDropdownHeader = document.getElementById("papersDropdownHeader");
+    const papersDropdownPlaceholder = papersDropdownHeader.querySelector(".papers-dropdown-placeholder");
+    const selectedChips = document.getElementById("selectedChips");
+    const papersLibrary = document.getElementById("papersLibrary");
+    const libSearchInput = document.getElementById("libSearchInput");
+    const libSelectAll = document.getElementById("libSelectAll");
+    const libClearAll = document.getElementById("libClearAll");
 
     // ── 状态 ──
     const ACTIVE_JOB_KEY = "paperread_active_job";
     let uploadedFileId = null;
     let uploadedFiles = [];
+    let selectedLibraryFiles = [];
+    let allPapersCache = []; // 用于本地搜索
     let lastResultMarkdown = "";
     let lastResultJson = null;
+    let analysisStartTime = null;
+    let timerInterval = null;
+    let promptLibrary = {};
 
     const historyList = document.getElementById("historyList");
     const historySearch = document.getElementById("historySearch");
     const historyPageSize = document.getElementById("historyPageSize");
+    const historySort = document.getElementById("historySort");
     const historyPagination = document.getElementById("historyPagination");
 
     // ── 历史状态 ──
@@ -42,6 +69,8 @@
     // ── 初始化 ──
     loadModels();
     loadHistory();
+    loadPapers();
+    loadPrompts();
     tryResumeJob();
 
     // ── 上传区域事件 ──
@@ -71,7 +100,107 @@
         }
     });
 
-    // ── 开始分析 ──
+    // ── 论文库下拉交互 ──
+    papersDropdownHeader.addEventListener("click", (e) => {
+        e.stopPropagation();
+        papersDropdown.classList.toggle("active");
+        if (papersDropdown.classList.contains("active")) {
+            libSearchInput.focus();
+        }
+    });
+
+    document.addEventListener("click", () => {
+        papersDropdown.classList.remove("active");
+    });
+
+    document.getElementById("papersDropdownContent").addEventListener("click", (e) => {
+        e.stopPropagation();
+    });
+
+    libSearchInput.addEventListener("input", () => {
+        renderPapersLibrary(allPapersCache, libSearchInput.value.trim());
+    });
+
+    libSelectAll.addEventListener("click", () => {
+        const searchTerm = libSearchInput.value.trim().toLowerCase();
+        const papersToSelect = searchTerm
+            ? allPapersCache.filter(p => p.name.toLowerCase().includes(searchTerm))
+            : allPapersCache;
+
+        papersToSelect.forEach(p => {
+            if (!selectedLibraryFiles.includes(p.name)) {
+                selectedLibraryFiles.push(p.name);
+            }
+        });
+        renderPapersLibrary(allPapersCache, libSearchInput.value.trim());
+        renderChips();
+        checkReady();
+    });
+
+    libClearAll.addEventListener("click", () => {
+        selectedLibraryFiles = [];
+        renderPapersLibrary(allPapersCache, libSearchInput.value.trim());
+        renderChips();
+        checkReady();
+    });
+
+    // ── 提示词库交互 ──
+    analysisSubject.addEventListener("change", () => {
+        const sub = analysisSubject.value;
+        analysisMode.innerHTML = "";
+        if (!sub || !promptLibrary[sub]) {
+            analysisMode.disabled = true;
+            analysisMode.innerHTML = '<option value="">请先选择学科</option>';
+            return;
+        }
+
+        analysisMode.disabled = false;
+        const modes = promptLibrary[sub];
+        for (const [name, path] of Object.entries(modes)) {
+            const opt = document.createElement("option");
+            opt.value = path;
+            opt.textContent = name;
+            analysisMode.appendChild(opt);
+        }
+
+        // 自动选择第一个并触发预览
+        if (modes && Object.keys(modes).length > 0) {
+            analysisMode.value = Object.values(modes)[0];
+            analysisMode.dispatchEvent(new Event("change"));
+        }
+    });
+
+    analysisMode.addEventListener("change", async () => {
+        const path = analysisMode.value;
+        if (!path || customPromptArea.classList.contains("active")) {
+            promptPreview.classList.remove("active");
+            return;
+        }
+
+        try {
+            const resp = await fetch(`/api/prompts/content?path=${encodeURIComponent(path)}`);
+            const data = await resp.json();
+            if (data.content) {
+                promptPreviewContent.textContent = data.content;
+                promptPreview.classList.add("active");
+            }
+        } catch (e) {
+            promptPreview.classList.remove("active");
+        }
+    });
+
+    btnShowCustomPrompt.addEventListener("click", () => {
+        btnShowCustomPrompt.classList.toggle("active");
+        customPromptArea.classList.toggle("active");
+
+        // 如果开启了自定义，隐藏常规预览
+        if (customPromptArea.classList.contains("active")) {
+            promptPreview.classList.remove("active");
+        } else {
+            // 如果关闭了自定义，恢复常规预览
+            analysisMode.dispatchEvent(new Event("change"));
+        }
+    });
     btnAnalyze.addEventListener("click", startAnalysis);
 
     // ── 结果标签切换 ──
@@ -113,6 +242,38 @@
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
     }
+
+    // ── 重启服务器 ──
+    btnRestart.addEventListener("click", async () => {
+        if (!confirm("确定要重启服务器吗？")) return;
+        try {
+            await fetch("/api/restart", { method: "POST" });
+
+            let secondsLeft = 5;
+            const updateMessage = () => {
+                document.body.innerHTML = `<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;color:#6b5c4d;font-size:18px;">
+                    <div>正在重启服务器...</div>
+                    <div id="countdown-text" style="font-size:14px;margin-top:10px;color:#9a8b7a;">页面将在 ${secondsLeft} 秒后自动刷新</div>
+                </div>`;
+            };
+
+            updateMessage();
+
+            const timer = setInterval(() => {
+                secondsLeft--;
+                if (secondsLeft <= 0) {
+                    clearInterval(timer);
+                    window.location.reload();
+                } else {
+                    const el = document.getElementById("countdown-text");
+                    if (el) el.textContent = `页面将在 ${secondsLeft} 秒后自动刷新`;
+                }
+            }, 1000);
+
+        } catch (e) {
+            showError("重启请求失败: " + e.message);
+        }
+    });
 
     // ── 关闭服务器 ──
     btnShutdown.addEventListener("click", async () => {
@@ -178,6 +339,7 @@
             uploadedFileId = data.file_id;
             uploadedFiles = data.files;
             renderFileList();
+            loadPapers(); // 刷新论文库
             checkReady();
         } catch (e) {
             showError("上传失败: " + e.message);
@@ -210,8 +372,7 @@
     // ── 表单就绪检查 ──
     function checkReady() {
         btnAnalyze.disabled = !(
-            uploadedFileId &&
-            uploadedFiles.length &&
+            (uploadedFileId && uploadedFiles.length || selectedLibraryFiles.length) &&
             ocrSelect.value &&
             llmSelect.value
         );
@@ -226,13 +387,31 @@
         btnAnalyze.disabled = true;
         btnAnalyze.textContent = "分析中...";
 
-        const analysisType = document.querySelector('input[name="analysisType"]:checked').value;
-
         const formData = new FormData();
-        formData.append("file_id", uploadedFileId);
+        if (uploadedFileId) formData.append("file_id", uploadedFileId);
+        if (selectedLibraryFiles.length) formData.append("filenames", JSON.stringify(selectedLibraryFiles));
+
+        if (customPromptArea.classList.contains("active") && customPromptText.value.trim()) {
+            const promptContent = customPromptText.value.trim();
+            formData.append("analysis_type", promptContent);
+
+            // 如果勾选保存
+            if (saveCustomPrompt.checked && customPromptName.value.trim()) {
+                const saveForm = new FormData();
+                saveForm.append("category", "自定义");
+                saveForm.append("name", customPromptName.value.trim());
+                saveForm.append("content", promptContent);
+                fetch("/api/prompts/save", { method: "POST", body: saveForm })
+                    .then(() => loadPrompts()); // 异步保存，不阻塞分析启动
+            }
+        } else {
+            formData.append("analysis_type", analysisMode.value || "运筹学/综合分析");
+        }
+
         formData.append("ocr_model", ocrSelect.value);
         formData.append("llm_model", llmSelect.value);
-        formData.append("analysis_type", analysisType);
+        formData.append("read_strategy", readStrategy.value);
+        formData.append("ocr_parallel_threads", ocrParallelThreads.value);
 
         try {
             const resp = await fetch("/api/analyze", { method: "POST", body: formData });
@@ -250,11 +429,15 @@
             updateProgress(0, "正在初始化...", "等待 Pipeline 启动");
             progressSection.scrollIntoView({ behavior: "smooth", block: "center" });
 
+            // 启动记时
+            analysisStartTime = Date.now();
+            startTimer();
+
             // 保存 job 信息到 localStorage
             localStorage.setItem(ACTIVE_JOB_KEY, JSON.stringify({
                 jobId: data.job_id,
                 fileCount: data.file_count,
-                startedAt: Date.now()
+                startedAt: analysisStartTime
             }));
 
             // 连接 SSE
@@ -291,6 +474,7 @@
 
         source.addEventListener("done", (e) => {
             source.close();
+            stopTimer();
             localStorage.removeItem(ACTIVE_JOB_KEY);
             progressFileInfo.textContent = "";
             const data = JSON.parse(e.data);
@@ -309,6 +493,7 @@
 
         source.onerror = () => {
             source.close();
+            stopTimer();
             progressFileInfo.textContent = "";
             // 尝试获取结果（可能已完成）
             setTimeout(() => fetchResults(jobId), 1000);
@@ -335,10 +520,12 @@
 
             if (data.error) {
                 showError("获取结果失败: " + data.error);
+                stopTimer();
                 resetButton();
                 return;
             }
 
+            stopTimer();
             localStorage.removeItem(ACTIVE_JOB_KEY);
 
             // 保存原始数据用于下载
@@ -354,6 +541,7 @@
             resultSection.scrollIntoView({ behavior: "smooth", block: "start" });
             resetButton();
             loadHistory();
+            loadPapers(); // 刷新论文库，以防有新保存的
         } catch (e) {
             localStorage.removeItem(ACTIVE_JOB_KEY);
             showError("获取结果失败: " + e.message);
@@ -361,7 +549,170 @@
         }
     }
 
-    // ── 页面刷新后恢复进行中的任务 ──
+    // ── 论文库 ──
+    async function loadPapers() {
+        try {
+            const resp = await fetch("/api/papers");
+            const data = await resp.json();
+            allPapersCache = data.papers || [];
+            renderPapersLibrary(allPapersCache);
+        } catch (e) {
+            papersLibrary.innerHTML = '<div class="papers-library-status">加载论文库失败</div>';
+        }
+    }
+
+    function renderPapersLibrary(papers, searchTerm = "") {
+        const filtered = searchTerm
+            ? papers.filter(p => p.name.toLowerCase().includes(searchTerm.toLowerCase()))
+            : papers;
+
+        if (!filtered.length) {
+            papersLibrary.innerHTML = '<div class="papers-library-status">' +
+                (searchTerm ? "未找到相关论文" : "论文库为空") + '</div>';
+            return;
+        }
+
+        papersLibrary.innerHTML = "";
+        filtered.forEach(p => {
+            const div = document.createElement("div");
+            div.className = "paper-lib-item";
+            const isSelected = selectedLibraryFiles.includes(p.name);
+
+            div.innerHTML = `
+                <div class="paper-lib-item-main">
+                    <input type="checkbox" ${isSelected ? "checked" : ""}>
+                    <span class="paper-lib-item-name" title="${escapeHtml(p.name)}">${escapeHtml(p.name)}</span>
+                </div>
+                <button class="btn-icon-delete" title="从库中删除此论文">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2M10 11v6M14 11v6"/></svg>
+                </button>
+            `;
+
+            div.addEventListener("click", () => {
+                const cb = div.querySelector('input[type="checkbox"]');
+                cb.checked = !cb.checked;
+                updateSelection(p.name, cb.checked);
+            });
+
+            div.querySelector('.paper-lib-item-main input').addEventListener("click", (e) => {
+                e.stopPropagation();
+                updateSelection(p.name, e.target.checked);
+            });
+
+            div.querySelector('.btn-icon-delete').addEventListener("click", async (e) => {
+                e.stopPropagation();
+                if (!confirm(`确定要从库中彻底删除论文「${p.name}」吗？`)) return;
+                try {
+                    const formData = new FormData();
+                    formData.append("filename", p.name);
+                    const resp = await fetch("/api/papers/delete", {
+                        method: "POST",
+                        body: formData
+                    });
+
+                    if (resp.ok) {
+                        const result = await resp.json();
+                        console.log("删除成功:", result);
+                        // 清除当前选择
+                        selectedLibraryFiles = selectedLibraryFiles.filter(name => name !== p.name);
+                        renderChips();
+                        checkReady();
+                        // 重新加载库
+                        await loadPapers();
+                    } else {
+                        const err = await resp.json();
+                        console.error("删除失败:", err);
+                        showError("删除失败: " + (err.detail || "未知错误"));
+                    }
+                } catch (err) {
+                    console.error("请求异常:", err);
+                    showError("请求失败: " + err.message);
+                }
+            });
+
+            papersLibrary.appendChild(div);
+        });
+    }
+
+    function updateSelection(filename, isSelected) {
+        if (isSelected) {
+            if (!selectedLibraryFiles.includes(filename)) {
+                selectedLibraryFiles.push(filename);
+            }
+        } else {
+            selectedLibraryFiles = selectedLibraryFiles.filter(name => name !== filename);
+        }
+
+        renderChips();
+        checkReady();
+    }
+
+    function renderChips() {
+        selectedChips.innerHTML = "";
+        selectedLibraryFiles.forEach(name => {
+            const chip = document.createElement("div");
+            chip.className = "chip";
+            chip.innerHTML = `
+                <span>${escapeHtml(name)}</span>
+                <span class="chip-remove" data-name="${escapeHtml(name)}">&times;</span>
+            `;
+            chip.querySelector(".chip-remove").addEventListener("click", (e) => {
+                e.stopPropagation();
+                selectedLibraryFiles = selectedLibraryFiles.filter(n => n !== name);
+                renderChips();
+                renderPapersLibrary(allPapersCache, libSearchInput.value.trim());
+                checkReady();
+            });
+            selectedChips.appendChild(chip);
+        });
+
+        // 更新 Header 文字状态
+        if (selectedLibraryFiles.length > 0) {
+            papersDropdownPlaceholder.textContent = `已选择 ${selectedLibraryFiles.length} 篇`;
+            papersDropdownPlaceholder.style.color = "var(--accent)";
+        } else {
+            papersDropdownPlaceholder.textContent = "从论文库中寻找...";
+            papersDropdownPlaceholder.style.color = "";
+        }
+    }
+
+    // ── 提示词库 ──
+    async function loadPrompts() {
+        try {
+            const resp = await fetch("/api/prompts");
+            const data = await resp.json();
+            promptLibrary = data.library;
+            renderPromptSubjects();
+        } catch (e) {
+            analysisSubject.innerHTML = '<option value="">加载失败</option>';
+        }
+    }
+
+    function renderPromptSubjects() {
+        const currentSub = analysisSubject.value;
+        analysisSubject.innerHTML = '<option value="">选择领域...</option>';
+
+        // 优先显示“通用”和“运筹学”
+        const priority = ["通用", "运筹学"];
+        const others = Object.keys(promptLibrary).filter(k => !priority.includes(k)).sort();
+
+        [...priority, ...others].forEach(sub => {
+            if (promptLibrary[sub]) {
+                const opt = document.createElement("option");
+                opt.value = sub;
+                opt.textContent = sub;
+                analysisSubject.appendChild(opt);
+            }
+        });
+
+        if (currentSub && promptLibrary[currentSub]) {
+            analysisSubject.value = currentSub;
+            analysisSubject.dispatchEvent(new Event("change"));
+        } else if (promptLibrary["运筹学"]) {
+            analysisSubject.value = "运筹学";
+            analysisSubject.dispatchEvent(new Event("change"));
+        }
+    }
     async function tryResumeJob() {
         const saved = localStorage.getItem(ACTIVE_JOB_KEY);
         if (!saved) return;
@@ -378,6 +729,11 @@
                 resultSection.classList.remove("active");
                 btnAnalyze.disabled = true;
                 btnAnalyze.textContent = "分析中...";
+
+                // 恢复记时
+                analysisStartTime = info.startedAt;
+                startTimer();
+
                 // 用服务器快照立即还原进度条
                 if (data.progress) {
                     const p = data.progress;
@@ -508,6 +864,24 @@
         errorMsg.classList.remove("active");
     }
 
+    // ── 持续时间计时器 ──
+    function startTimer() {
+        stopTimer();
+        timerInterval = setInterval(() => {
+            const elapsed = Date.now() - analysisStartTime;
+            const minutes = Math.floor(elapsed / 60000);
+            const seconds = Math.floor((elapsed % 60000) / 1000);
+            progressTimer.textContent = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+        }, 1000);
+    }
+
+    function stopTimer() {
+        if (timerInterval) {
+            clearInterval(timerInterval);
+            timerInterval = null;
+        }
+    }
+
     // ── 历史论文 ──
     let searchTimer = null;
     historySearch.addEventListener("input", () => {
@@ -523,11 +897,21 @@
         loadHistory();
     });
 
+    historySort.addEventListener("change", () => {
+        historyPage = 1;
+        loadHistory();
+    });
+
     async function loadHistory() {
         try {
             const search = historySearch.value.trim();
             const pageSize = historyPageSize.value;
-            const params = new URLSearchParams({ page: historyPage, page_size: pageSize });
+            const sort = historySort.value;
+            const params = new URLSearchParams({
+                page: historyPage,
+                page_size: pageSize,
+                sort: sort
+            });
             if (search) params.set("search", search);
 
             const resp = await fetch("/api/history?" + params);
@@ -574,12 +958,40 @@
                             <button class="download-dropdown-item" data-file="${escapeHtml(item.files.structured)}">structured.md</button>
                         </div>
                     </div>
+                    <button class="btn-history btn-history-delete" title="删除此记录">删除</button>
                 </div>
             `;
 
             // 阅读按钮
             div.querySelector(".btn-history-read").addEventListener("click", () => {
                 readHistoryFile(item.files.summary);
+            });
+
+            // 删除按钮
+            div.querySelector(".btn-history-delete").addEventListener("click", async () => {
+                if (!confirm(`确定要彻底删除论文「${item.title}」的分析记录吗？\n此操作不可恢复。`)) return;
+                try {
+                    const formData = new FormData();
+                    formData.append("base_name", item.base_name);
+                    const resp = await fetch("/api/history/delete", {
+                        method: "POST",
+                        body: formData
+                    });
+
+                    if (resp.ok) {
+                        const result = await resp.json();
+                        console.log("删除成功:", result);
+                        // 立即刷新历史列表
+                        await loadHistory();
+                    } else {
+                        const err = await resp.json();
+                        console.error("删除失败:", err);
+                        showError("删除失败: " + (err.detail || "未知错误"));
+                    }
+                } catch (e) {
+                    console.error("请求异常:", e);
+                    showError("请求失败: " + e.message);
+                }
             });
 
             // 下载下拉

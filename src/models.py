@@ -26,6 +26,13 @@ class AnalysisType(Enum):
     METHODOLOGY_FOCUS = "methodology_focus"
 
 
+class ReadStrategy(Enum):
+    """阅读策略枚举"""
+    HIERARCHICAL = "hierarchical"  # 分层分块总结（默认）
+    ANCHORED = "anchored"          # 全局锚点精度模式
+    FULL_CONTEXT = "full_context"  # 一次性全文读取（适合短文或大上下文模型）
+
+
 @dataclass
 class PageInfo:
     """单页信息 (阶段1输出)"""
@@ -72,11 +79,14 @@ class AssemblyResult:
     output_path: Path
 
 
+from typing import Dict, List, Optional, Union
+
+
 @dataclass
 class AnalysisResult:
     """阶段4输出"""
     analysis_text: str
-    analysis_type: AnalysisType
+    analysis_type: Union[AnalysisType, str]
     model_name: str
     token_count: int = 0
 

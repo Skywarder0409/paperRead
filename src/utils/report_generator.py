@@ -24,16 +24,19 @@ def generate_report(result: PipelineResult, output_dir: Path) -> None:
     ensure_dir(output_dir)
 
     safe_name = _sanitize(result.metadata.title)
+    # 加上时间戳以区分同一篇论文的不同分析（防止覆盖）
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_tag = "{}_{}".format(safe_name, timestamp)
 
     # ── Markdown 摘要报告 ──
     md = _build_markdown_report(result)
-    md_path = output_dir / "{}_summary.md".format(safe_name)
+    md_path = output_dir / "{}_summary.md".format(report_tag)
     safe_write_text(md_path, md)
     logger.info("摘要报告: %s", md_path)
 
     # ── JSON 数据 ──
     data = _build_json_data(result)
-    json_path = output_dir / "{}_analysis.json".format(safe_name)
+    json_path = output_dir / "{}_analysis.json".format(report_tag)
     safe_write_json(json_path, data)
     logger.info("分析数据: %s", json_path)
 
@@ -51,7 +54,7 @@ def _build_markdown_report(result: PipelineResult) -> str:
         "**作者**: {} | **总页数**: {} | **分析模式**: {} | **模型**: {} | **耗时**: {:.1f} 秒".format(
             meta.author or "未知",
             meta.total_pages,
-            analysis.analysis_type.value,
+            analysis.analysis_type.value if hasattr(analysis.analysis_type, "value") else analysis.analysis_type,
             analysis.model_name,
             result.processing_time_seconds,
         ),
@@ -100,7 +103,7 @@ def _build_json_data(result: PipelineResult) -> dict:
             "references_start_page": structure.references_start_page,
         },
         "analysis": {
-            "type": analysis.analysis_type.value,
+            "type": analysis.analysis_type.value if hasattr(analysis.analysis_type, "value") else analysis.analysis_type,
             "model": analysis.model_name,
             "token_count": analysis.token_count,
             "text": analysis.analysis_text,
