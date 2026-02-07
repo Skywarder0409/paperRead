@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# 运行时生成
+pipeline.log
+cache/
+output/
+
+# 用户数据
+papers/*.pdf
+
+# IDE
+.vscode/
+.idea/
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# Claude Code
+.claude/
+
+# local history
+.history/

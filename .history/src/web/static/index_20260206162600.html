@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>paperRead - 本地论文智能解读</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+
+<body>
+    <header class="header">
+        <div class="header-inner">
+            <div>
+                <h1>paper<span>Read</span></h1>
+            </div>
+            <div class="header-right">
+                <div class="header-subtitle">本地论文智能解读</div>
+                <button class="btn-shutdown" id="btnShutdown" title="关闭服务器">关闭</button>
+            </div>
+        </div>
+    </header>
+
+    <main class="container">
+        <!-- 上传区域 -->
+        <div class="card">
+            <div class="card-title">上传论文</div>
+            <div class="upload-zone" id="uploadZone">
+                <div class="upload-zone-icon">&#128196;</div>
+                <div class="upload-zone-text">拖拽 PDF 到此处 或 点击上传</div>
+                <div class="upload-zone-hint">支持同时上传多个 PDF 文件</div>
+                <input type="file" id="fileInput" accept=".pdf" multiple>
+            </div>
+            <div class="file-list" id="fileList"></div>
+
+            <div class="papers-divider">或从已保存的论文中选择</div>
+
+            <!-- 已选论文卡槽 -->
+            <div class="selected-chips" id="selectedChips"></div>
+
+            <div class="papers-dropdown" id="papersDropdown">
+                <div class="papers-dropdown-header" id="papersDropdownHeader">
+                    <div class="papers-dropdown-header-main">
+                        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path
+                                d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2a2.5 2.5 0 0 1 2.5 2.5v15a2.5 2.5 0 0 1-2.5 2.5A2.5 2.5 0 0 1 4 19.5Z" />
+                            <path d="M20 22.5h-10.5c-.5 0-1-.2-1.4-.6a2.5 2.5 0 0 1 0-3.4c.4-.4.9-.6 1.4-.6H20" />
+                            <path d="M20 18.5v-14a2.5 2.5 0 0 0-2.5-2.5H9" />
+                        </svg>
+                        <span class="papers-dropdown-placeholder">从论文库中寻找...</span>
+                    </div>
+                    <span class="papers-dropdown-arrow">&#9662;</span>
+                </div>
+                <div class="papers-dropdown-content" id="papersDropdownContent">
+                    <div class="papers-dropdown-search">
+                        <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="11" cy="11" r="8" />
+                            <path d="m21 21-4.3-4.3" />
+                        </svg>
+                        <input type="text" id="libSearchInput" placeholder="请输入关键词搜索论文...">
+                    </div>
+                    <div class="papers-dropdown-actions">
+                        <button type="button" id="libSelectAll" class="btn-text">全选</button>
+                        <button type="button" id="libClearAll" class="btn-text">清除</button>
+                    </div>
+                    <div class="papers-dropdown-list" id="papersLibrary">
+                        <div class="papers-library-status">正在连接论文库...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 模型与模式选择 -->
+        <div class="card">
+            <div class="card-title">分析设置</div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="ocrModel">OCR 模型</label>
+                    <select id="ocrModel">
+                        <option value="">加载中...</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="llmModel">LLM 模型</label>
+                    <select id="llmModel">
+                        <option value="">加载中...</option>
+                    </select>
+                </div>
+            </div>
+            <div class="form-group">
+                <label>分析模式</label>
+                <div class="mode-group">
+                    <div class="mode-option">
+                        <input type="radio" name="analysisType" id="modeComprehensive" value="comprehensive" checked>
+                        <label for="modeComprehensive">综合分析</label>
+                    </div>
+                    <div class="mode-option">
+                        <input type="radio" name="analysisType" id="modeQuick" value="quick">
+                        <label for="modeQuick">快速总结</label>
+                    </div>
+                    <div class="mode-option">
+                        <input type="radio" name="analysisType" id="modeMethodology" value="methodology_focus">
+                        <label for="modeMethodology">方法论聚焦</label>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 开始按钮 -->
+        <button class="btn btn-primary" id="btnAnalyze" disabled>开始分析</button>
+        <div class="error-msg" id="errorMsg"></div>
+
+        <!-- 进度 -->
+        <div class="card progress-section" id="progressSection">
+            <div class="card-title">分析进度<span class="progress-file-info" id="progressFileInfo"></span></div>
+            <div class="progress-header">
+                <span class="progress-stage" id="progressStage">准备中...</span>
+                <div class="progress-right">
+                    <span class="progress-timer" id="progressTimer">00:00</span>
+                    <span class="progress-percent" id="progressPercent">0%</span>
+                </div>
+            </div>
+            <div class="progress-bar">
+                <div class="progress-fill" id="progressFill"></div>
+            </div>
+            <div class="progress-detail" id="progressDetail"></div>
+        </div>
+
+        <!-- 结果 -->
+        <div class="card result-section" id="resultSection">
+            <div class="card-title">分析结果</div>
+            <div class="result-tabs">
+                <button class="result-tab active" data-tab="markdown">报告</button>
+                <button class="result-tab" data-tab="json">JSON 数据</button>
+            </div>
+            <div class="result-content" id="resultMarkdown"></div>
+            <div class="result-content result-json" id="resultJson"></div>
+            <div class="download-bar" id="downloadBar">
+                <button class="btn-download" id="btnDownloadMd">下载 Markdown 报告</button>
+                <button class="btn-download btn-download-secondary" id="btnDownloadJson">下载 JSON 数据</button>
+            </div>
+        </div>
+
+        <!-- 历史论文 -->
+        <div class="card" id="historySection">
+            <div class="card-title">历史论文</div>
+            <div class="history-toolbar">
+                <input type="text" class="history-search" id="historySearch" placeholder="搜索标题或作者...">
+                <div class="history-page-size">
+                    <label for="historyPageSize">每页</label>
+                    <select id="historyPageSize">
+                        <option value="10" selected>10</option>
+                        <option value="50">50</option>
+                        <option value="100">100</option>
+                    </select>
+                </div>
+            </div>
+            <div class="history-list" id="historyList">
+                <div class="history-empty">暂无历史记录</div>
+            </div>
+            <div class="history-pagination" id="historyPagination"></div>
+        </div>
+    </main>
+
+    <script src="/static/app.js?v=4"></script>
+</body>
+
+</html>
