@@ -48,24 +48,15 @@ def _build_markdown_report(result: PipelineResult) -> str:
         "",
         "> 自动生成于 {}".format(datetime.now().strftime("%Y-%m-%d %H:%M")),
         "",
-        "| 项目 | 值 |",
-        "|------|-----|",
-        "| 作者 | {} |".format(meta.author or "未知"),
-        "| 总页数 | {} |".format(meta.total_pages),
-        "| 分析模式 | {} |".format(analysis.analysis_type.value),
-        "| 使用模型 | {} |".format(analysis.model_name),
-        "| 处理耗时 | {:.1f} 秒 |".format(result.processing_time_seconds),
+        "**作者**: {} | **总页数**: {} | **分析模式**: {} | **模型**: {} | **耗时**: {:.1f} 秒".format(
+            meta.author or "未知",
+            meta.total_pages,
+            analysis.analysis_type.value,
+            analysis.model_name,
+            result.processing_time_seconds,
+        ),
         "",
     ]
-
-    # 摘要
-    if structure.abstract:
-        lines.extend([
-            "## 论文摘要",
-            "",
-            structure.abstract,
-            "",
-        ])
 
     # 文档结构概览
     if structure.sections:

@@ -22,8 +22,10 @@
     const resultJson = document.getElementById("resultJson");
     const btnDownloadMd = document.getElementById("btnDownloadMd");
     const btnDownloadJson = document.getElementById("btnDownloadJson");
+    const btnShutdown = document.getElementById("btnShutdown");
 
     // ── 状态 ──
+    const ACTIVE_JOB_KEY = "paperread_active_job";
     let uploadedFileId = null;
     let uploadedFiles = [];
     let lastResultMarkdown = "";
@@ -40,6 +42,7 @@
     // ── 初始化 ──
     loadModels();
     loadHistory();
+    tryResumeJob();
 
     // ── 上传区域事件 ──
     uploadZone.addEventListener("click", () => fileInput.click());
@@ -110,6 +113,17 @@
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
     }
+
+    // ── 关闭服务器 ──
+    btnShutdown.addEventListener("click", async () => {
+        if (!confirm("确定要关闭服务器吗？所有进行中的任务将终止。")) return;
+        try {
+            await fetch("/api/shutdown", { method: "POST" });
+        } catch {
+            // 连接断开是预期行为
+        }
+        document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:#6b5c4d;font-size:18px;">服务器已关闭</div>';
+    });
 
     // ── 加载模型列表 ──
     async function loadModels() {
@@ -236,6 +250,13 @@
             updateProgress(0, "正在初始化...", "等待 Pipeline 启动");
             progressSection.scrollIntoView({ behavior: "smooth", block: "center" });
 
+            // 保存 job 信息到 localStorage
+            localStorage.setItem(ACTIVE_JOB_KEY, JSON.stringify({
+                jobId: data.job_id,
+                fileCount: data.file_count,
+                startedAt: Date.now()
+            }));
+
             // 连接 SSE
             connectSSE(data.job_id);
         } catch (e) {
@@ -270,6 +291,7 @@
 
         source.addEventListener("done", (e) => {
             source.close();
+            localStorage.removeItem(ACTIVE_JOB_KEY);
             progressFileInfo.textContent = "";
             const data = JSON.parse(e.data);
             if (data.status === "completed") {
@@ -317,6 +339,8 @@
                 return;
             }
 
+            localStorage.removeItem(ACTIVE_JOB_KEY);
+
             // 保存原始数据用于下载
             lastResultMarkdown = data.markdown;
             lastResultJson = data.json_data;
@@ -331,8 +355,60 @@
             resetButton();
             loadHistory();
         } catch (e) {
+            localStorage.removeItem(ACTIVE_JOB_KEY);
             showError("获取结果失败: " + e.message);
             resetButton();
+        }
+    }
+
+    // ── 页面刷新后恢复进行中的任务 ──
+    async function tryResumeJob() {
+        const saved = localStorage.getItem(ACTIVE_JOB_KEY);
+        if (!saved) return;
+
+        let info;
+        try { info = JSON.parse(saved); } catch { localStorage.removeItem(ACTIVE_JOB_KEY); return; }
+
+        try {
+            const resp = await fetch(`/api/results/${info.jobId}`);
+            if (resp.status === 202) {
+                // 仍在运行，立即恢复进度显示
+                const data = await resp.json();
+                progressSection.classList.add("active");
+                resultSection.classList.remove("active");
+                btnAnalyze.disabled = true;
+                btnAnalyze.textContent = "分析中...";
+                // 用服务器快照立即还原进度条
+                if (data.progress) {
+                    const p = data.progress;
+                    const pct = Math.round(p.progress * 100);
+                    const stageName = p.stage
+                        ? `阶段 ${p.stage}/4: ${p.stage_name}`
+                        : p.stage_name;
+                    updateProgress(pct, stageName, p.detail);
+                    if (p.file_total > 1) {
+                        progressFileInfo.textContent = `${p.file_title}  (${p.file_index}/${p.file_total})`;
+                    }
+                } else {
+                    updateProgress(0, "恢复连接...", "正在重新获取进度");
+                }
+                connectSSE(info.jobId);
+            } else if (resp.ok) {
+                // 已完成，直接显示结果
+                localStorage.removeItem(ACTIVE_JOB_KEY);
+                const data = await resp.json();
+                lastResultMarkdown = data.markdown;
+                lastResultJson = data.json_data;
+                resultMarkdown.innerHTML = simpleMarkdown(data.markdown);
+                resultJson.innerHTML = `<pre>${escapeHtml(JSON.stringify(data.json_data, null, 2))}</pre>`;
+                resultJson.style.display = "none";
+                resultSection.classList.add("active");
+            } else {
+                // 任务不存在（服务器重启等），清除
+                localStorage.removeItem(ACTIVE_JOB_KEY);
+            }
+        } catch {
+            localStorage.removeItem(ACTIVE_JOB_KEY);
         }
     }
 

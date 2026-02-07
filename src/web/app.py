@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import uuid
 from pathlib import Path
@@ -140,11 +141,25 @@ async def progress_stream(job_id: str):
         return JSONResponse(status_code=404, content={"error": "任务不存在"})
 
     async def event_generator():
+        # 任务已结束时立即返回结果（防止刷新后挂起）
+        if job.status in (JobStatus.COMPLETED, JobStatus.FAILED):
+            yield {
+                "event": "done",
+                "data": json.dumps({"status": job.status.value}),
+            }
+            return
+
         while True:
             try:
-                event = await asyncio.wait_for(job.queue.get(), timeout=60)
+                event = await asyncio.wait_for(job.queue.get(), timeout=15)
             except asyncio.TimeoutError:
-                # 心跳
+                # 超时时检查任务是否已结束（防止 None 哨兵被旧连接消费）
+                if job.status in (JobStatus.COMPLETED, JobStatus.FAILED):
+                    yield {
+                        "event": "done",
+                        "data": json.dumps({"status": job.status.value}),
+                    }
+                    return
                 yield {"event": "heartbeat", "data": "{}"}
                 continue
 
@@ -172,7 +187,10 @@ async def get_results(job_id: str):
         return JSONResponse(status_code=404, content={"error": "任务不存在"})
 
     if job.status == JobStatus.RUNNING:
-        return JSONResponse(status_code=202, content={"status": "running"})
+        content = {"status": "running"}
+        if job.last_progress:
+            content["progress"] = job.last_progress.to_dict()
+        return JSONResponse(status_code=202, content=content)
 
     if job.status == JobStatus.FAILED:
         return JSONResponse(status_code=500, content={"error": job.error})
@@ -261,6 +279,18 @@ async def get_history_file(filename: str):
         return JSONResponse(content=json.loads(content))
 
     return PlainTextResponse(content=content)
+
+
+@app.post("/api/shutdown")
+async def shutdown():
+    """关闭服务器，终止整个进程"""
+    # 延迟 0.5s 让响应先返回给前端，然后强制终止整个进程（包括线程池）
+    async def _exit():
+        await asyncio.sleep(0.5)
+        os._exit(0)
+
+    asyncio.create_task(_exit())
+    return {"message": "shutting down"}
 
 
 if __name__ == "__main__":

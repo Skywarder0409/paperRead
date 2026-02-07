@@ -65,6 +65,7 @@ class Job:
     ocr_model: str = ""
     llm_model: str = ""
     queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue())
+    last_progress: Optional[ProgressEvent] = None  # 最新进度快照（供刷新恢复）
     result_markdown: str = ""
     result_json: dict = field(default_factory=dict)
     error: str = ""
@@ -98,9 +99,10 @@ class ProgressHandler(logging.Handler):
     _RE_MODEL_LOADING = re.compile(r"验证 Ollama (OCR|LLM) 模型: (.+)")
     _RE_MODEL_READY = re.compile(r"(OCR|LLM) 模型已就绪")
 
-    def __init__(self, queue: asyncio.Queue, loop: asyncio.AbstractEventLoop):
+    def __init__(self, job: Job, loop: asyncio.AbstractEventLoop):
         super().__init__(level=logging.DEBUG)
-        self._queue = queue
+        self._job = job
+        self._queue = job.queue
         self._loop = loop
         self._current_stage = 0
         self._total_pages = 0
@@ -132,6 +134,7 @@ class ProgressHandler(logging.Handler):
         event = self._parse(msg)
         if event:
             event = self._apply_file_info(event)
+            self._job.last_progress = event
             try:
                 self._loop.call_soon_threadsafe(self._queue.put_nowait, event)
             except RuntimeError:
@@ -274,7 +277,7 @@ def get_job(job_id: str) -> Optional[Job]:
 async def run_job(job: Job) -> None:
     """在线程池中执行 Pipeline，通过日志拦截推送进度"""
     loop = asyncio.get_running_loop()
-    handler = ProgressHandler(job.queue, loop)
+    handler = ProgressHandler(job, loop)
 
     # 挂载到 "src" 父 logger —— 所有 src.* 子 logger 的消息通过 propagation 上传到此
     # 这样不会干扰子 logger 自身的 handler 初始化（get_logger 中的 if logger.handlers 检查）
